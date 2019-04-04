@@ -5,6 +5,7 @@
 
 import numpy as np
 from pyrdmp.utils import psi
+import matplotlib.pyplot as plt
 
 class DynamicMovementPrimitive:
 
@@ -31,14 +32,12 @@ class DynamicMovementPrimitive:
         return np.exp((-self.as_deg) * np.linspace(0, 1.0, len(time))).T
 
     # Generate a gaussian distribution
-    def distributions(self, s, h = 1):
+    def distributions(self, s, h=1):
 
         # Find the centers of the Gaussian in the s domain
-        step = (s[0] - s[-1])/(self.ng - 1)
-        c = np.arange(min(s), max(s)+step, step)
+        c = np.linspace(min(s), max(s), self.ng)
         d = c[1] - c[0]
         c /= d
-
         # Calculate every gaussian
         psv = np.array([[psi(h, _c, _s/d) for _s in s] for _c in c]) 
 
@@ -57,7 +56,7 @@ class DynamicMovementPrimitive:
         for i in range(0, len(time)):
 
             # Add stabilization term
-            if self.stb == 1:
+            if self.stb:
                 mod = self.b*(g - x0)*s[i]
                 sigma[i] = (g - x0)*s[i]
             else:
@@ -68,7 +67,7 @@ class DynamicMovementPrimitive:
             f_target[i] = np.power(tau, 2)*ddx[i] - self.a*(self.b*(g - x[i]) - tau*dx[i]) + mod
 
         # Regression
-        w = [(sigma.T @ np.diag(p) @ f_target)/(sigma.T @ np.diag(p) @ sigma) for p in psv]
+        w = [sigma.T.dot(np.diag(p)).dot(f_target)/(sigma.T.dot(np.diag(p)).dot(sigma)) for p in psv]
 
         return f_target, np.array(w)
 
@@ -92,7 +91,7 @@ class DynamicMovementPrimitive:
                 dt = time[i] - time[i - 1]
 
             # Add stabilization term
-            if self.stb == 1:
+            if self.stb:
                 mod = self.b*(g - x0)*s[i]
                 sigma[i] = (g - x0)*s[i]
             else:
@@ -119,49 +118,56 @@ class DynamicMovementPrimitive:
     # Adaptation using reinforcement learning
     def adapt(self, w, x0, g, t, s, psv, samples, rate):
 
+        print('Trajectory adapted')
+
         # Initialize the action variables
         a = w
         tau = t[-1]
 
         # Flag which acts as a stop condition
         met_threshold = False
+        counter = 0
+        gain = []
 
         while not met_threshold:
-
-            exploration = np.array([[np.random.normal(np.std(psv[j]*a[j])) 
+            exploration = np.array([[np.random.normal(0, np.std(psv[j]*a[j]))
                     for j in range(self.ng)] for i in range(samples)])
-            
+
             actions = np.array([a + e for e in exploration])
 
             # Generate new rollouts
-            ddx, dx, x = np.transpose([self.generate(act, x0, g, t, s, psv) for act in actions], (1,2,0))
+            ddx, dx, x = np.transpose([self.generate(act, x0, g, t, s, psv) for act in actions], (1, 2, 0))
 
             # Estimate the Q values
             Q = [sum([self.reward(g, x[j, i], t[j], tau) for j in range(len(t))]) for i in range(samples)]
 
             # Sample the highest Q values to adapt the action parameters
-            sorted_samples = np.argsort(Q)[::-1][:np.floor(samples*rate).astype(int)]
+            sort_Q = np.argsort(Q)[::-1][:np.floor(samples*rate).astype(int)]
 
             # Update the action parameter
-            sumQ_y = sum([Q[i] for i in sorted_samples])
-            sumQ_x = sum([exploration[i]*Q[i] for i in sorted_samples])
+            sumQ_y = sum([Q[i] for i in sort_Q])
+            sumQ_x = sum([exploration[i]*Q[i] for i in sort_Q])
 
+            # Update the policy parameters
             a += sumQ_x/sumQ_y
 
-            if np.abs(x[-1, sorted_samples[0]])-g < 0.1:
+            gain.append(Q[sort_Q[0]])
+
+            # Stopping condition
+            if np.abs(x[-1, sort_Q[0]] - g) < 0.01:
                 met_threshold = True
 
-        return ddx[:, sorted_samples[0]], dx[:, sorted_samples[0]], x[:, sorted_samples[0]]
+        return ddx[:, sort_Q[0]], dx[:, sort_Q[0]], x[:, sort_Q[0]], actions[sort_Q[0]], np.cumsum(gain)
 
     # Reward function
-    def reward(self, goal, position, time, tau, w = 0.5, threshold = 0.01):
+    def reward(self, goal, position, time, tau, w=0.9, threshold=0.01):
 
         dist = goal - position
 
         if np.abs(time - tau) < threshold:
-            rwd = w*np.exp(-np.abs(np.power(dist, 2)))
+            rwd = w*np.exp(-np.sqrt(dist*dist.T))
         else:
-            rwd = (1-w) * np.exp(-np.abs(np.power(dist, 2)))/tau
+            rwd = (1-w) * np.exp(-np.sqrt(dist*dist.T))/tau
 
         return rwd
 
